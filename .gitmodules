@@ -1,0 +1,3 @@
+[submodule "nano-world-model"]
+	path = nano-world-model
+	url = https://github.com/simchowitzlabpublic/nano-world-model.git

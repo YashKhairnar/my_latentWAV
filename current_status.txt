@@ -1,0 +1,145 @@
+## Verdict
+
+Your core understanding is right: you are using WAV’s forward–inverse disagreement idea to actively collect data for improving LeWM.
+
+But the project is currently best described as a **working WAV-inspired proof of concept**, not yet a faithful or validated implementation of WAV for LeWM.
+
+| Question | Verdict |
+|---|---|
+| Is your conceptual mapping correct? | Yes |
+| Is the main pipeline implemented coherently? | Mostly yes |
+| Have you implemented full WAV? | No |
+| Have you shown WAV improves LeWM? | Not yet |
+| Is the 205-episode fine-tuned LeWM better? | No—it should remain rejected |
+
+## What you understood correctly
+
+Your component mapping is exactly the sensible one:
+
+| WAV component | Your implementation |
+|---|---|
+| Action-free future prior \(g\) | NanoWM |
+| Inverse dynamics model \(h\) | Pixel IDM |
+| Forward world model \(f\) | LeWM |
+| Verification score | LeWM prediction–subgoal latent MSE |
+| Acquisition | Execute the maximum-disagreement action block |
+| Self-improvement data | Real PushT successor transition |
+
+The ordering is also correct:
+
+```text
+current state → plausible subgoals → inferred actions
+              → LeWM predictions → maximum disagreement
+              → execute → collect real outcome
+```
+
+That is WAV’s goal-oriented verification cycle, and the paper explicitly permits computing disagreement in a continuous representation space such as LeWM’s latent space. [WAV paper §2](https://arxiv.org/html/2604.01985v2#S2)
+
+The corresponding code is consistent:
+
+- The IDM infers actions for every subgoal in [verifier.py](/Users/yash/Desktop/my_latentWAV/src/latentwav/verifier.py:122).
+- LeWM predicts their outcomes and `argmax` selects disagreement in [verifier.py](/Users/yash/Desktop/my_latentWAV/src/latentwav/verifier.py:175).
+- Frame and action histories are correctly aligned in [policy.py](/Users/yash/Desktop/my_latentWAV/src/latentwav/policy.py:83).
+- The data loader keeps sequences within episode boundaries and constructs the correct five-action blocks in [data.py](/Users/yash/Desktop/my_latentWAV/src/latentwav/data.py:154).
+- You correctly kept the expert checkpoint and rejected candidates that failed evaluation.
+
+You also correctly understood that the WAV collection policy is **not a reward-maximizing PushT controller**. Its purpose is to find informative transitions, not immediately solve the task.
+
+## The central conceptual correction
+
+A large disagreement does **not yet mean “LeWM is wrong.”** It means:
+
+> NanoWM’s proposed subgoal disagrees with what LeWM predicts under the IDM’s inferred action.
+
+That disagreement can arise from three different causes:
+
+1. LeWM is wrong—the desired WAV signal.
+2. NanoWM generated an implausible or poorly conditioned future.
+3. The IDM inferred an action that does not actually reach the subgoal.
+
+At present, you have not separated these explanations. Therefore, the score is a **candidate error proxy**, not a demonstrated LeWM error detector.
+
+The WAV paper validates this by measuring Spearman/Kendall rank correlation between verification score and ground-truth prediction error. That experiment is still missing here. [WAV ranking evaluation](https://arxiv.org/html/2604.01985v2#Sx13.SS2.SSS3)
+
+## What is still incomplete
+
+1. **NanoWM is not an action-free prior.**  
+   The checkpoint has `use_action: true` in [config.yaml](/Users/yash/Desktop/my_latentWAV/checkpoints/nanowm-pusht/config.yaml:8), but you invoke it without actions. The code works, but inference is outside its training condition. This removes one of WAV’s key asymmetries.
+
+2. **The IDM is dense, not sparse.**  
+   WAV’s justification depends on the inverse model using a compact action-relevant subset. Your IDM sees the full images and has no learned sparsity mechanism. A vanilla IDM is an ablation in the WAV paper, not the full method.
+
+3. **IDM MSE does not establish reachability.**  
+   A normalized validation MSE of `0.09098` is encouraging, but the critical test is: when its predicted five-action block is executed from the source state, does it actually reach the target/subgoal? Your documentation correctly says this remains untested.
+
+4. **There is no random acquisition baseline.**  
+   Without equal-budget random candidate selection, the 205-episode improvement cannot be attributed to maximum disagreement. More data alone—or merely the NanoWM/IDM candidate distribution—could explain it.
+
+5. **It is not yet a repeated self-improvement loop.**  
+   WAV updates both the forward model and IDM after acquisition and repeats. Your experiments collect with a largely fixed pipeline, update LeWM once, and keep the IDM frozen. This is explicitly still missing in [README.md](/Users/yash/Desktop/my_latentWAV/README.md:416).
+
+6. **Fine-tuning omitted the warm-up/expert replay data.**  
+   Training only on narrow WAV rollouts predictably caused forgetting. WAV experiments retain warm-up data while adding acquired data. Your next mixed expert/WAV replay proposal is the correct fix.
+
+7. **Offline evaluation is too short-horizon.**  
+   [compare_lewm.py](/Users/yash/Desktop/my_latentWAV/scripts/compare_lewm.py:71) measures teacher-forced next-latent prediction. CEM uses five autoregressive model steps. A candidate may improve one-step MSE while becoming much worse after error compounding—which is exactly what Experiment 09 suggests.
+
+8. **Full research conclusions need multiple seeds.**  
+   The WAV paper averages its main comparisons across several seeds. You currently have one trained candidate and one 50-pair evaluation set.
+
+## How to interpret your results
+
+The 205-episode result establishes:
+
+> Fine-tuning improved one-step latent prediction on held-out episodes drawn from the same WAV acquisition distribution.
+
+It does **not** establish that:
+
+- WAV selection was better than random;
+- the verifier ranks real LeWM errors correctly;
+- LeWM improved generally;
+- planning improved.
+
+Your control result strongly establishes that this particular candidate is worse for planning:
+
+- Expert: 64% success
+- Fine-tuned: 28%
+- Expert-only successes: 22
+- Candidate-only successes: 4
+
+From the saved paired outcomes, the exact paired test gives approximately `p = 0.00053`. Rejecting that checkpoint was therefore the right decision—not an overreaction. See [Experiment 09](/Users/yash/Desktop/my_latentWAV/docs/experiments/experiment-09/README.md:25).
+
+This does not refute WAV. It rejects this training recipe and checkpoint.
+
+One additional warning: the official LeWM paper reports about `96%` PushT success using the same headline CEM settings, whereas your baseline reaches `64%`. [LeWM paper](https://arxiv.org/html/2603.19312v3), [official evaluation configuration](https://raw.githubusercontent.com/Mengarr/lewm/main/config/eval/pusht.yaml). Different sampled goals, seeds, checkpoint versions, or evaluator details may explain this, but absolute planning conclusions should wait until the expert checkpoint reproduces the official protocol more closely.
+
+## The most important next experiment
+
+Before collecting more data or training a larger model, validate the verifier:
+
+1. At many saved PushT states, generate the same \(K\) NanoWM candidates.
+2. Infer all \(K\) IDM action blocks.
+3. From cloned simulator states, execute every candidate block.
+4. For every candidate, record:
+   - WAV score: predicted LeWM latent vs subgoal latent;
+   - true LeWM error: predicted LeWM latent vs real resulting latent;
+   - reachability error: subgoal latent vs real resulting latent.
+5. Measure Spearman and Kendall correlation between WAV score and true LeWM error.
+6. Compare selection by:
+   - random candidate;
+   - maximum WAV score;
+   - Oracle true error.
+
+If maximum WAV score does not reliably rank true errors, further fine-tuning will not test the WAV hypothesis—it will mostly train on whatever failures NanoWM and the IDM happen to produce.
+
+After that, implement mixed expert/WAV replay, repeated rounds, IDM updates, multi-horizon evaluation, and at least three independent seeds.
+
+## Bottom line
+
+You have built a coherent engineering foundation, and your mental model of WAV is substantially correct. You have also been appropriately conservative about rejecting bad checkpoints.
+
+The scientifically accurate summary today is:
+
+> We implemented a WAV-inspired acquisition pipeline around LeWM on PushT. Fine-tuning improved one-step prediction on the acquired-data distribution but caused forgetting and significantly degraded CEM control. Verifier ranking validity, random-selection advantages, sparse inverse verification, action-free subgoal generation, and repeated co-improvement remain unverified.
+
+That is a legitimate and useful research result—but it is not yet evidence that WAV successfully improves LeWM.
